@@ -1,0 +1,174 @@
+<style>
+  body { text-align: left; margin: 0; padding: 8px; background: #ffffff; color: #000000; font-family: monospace; font-size: 14px; }
+  pre { margin: 0; white-space: pre-wrap; word-break: break-all; }
+</style>
+
+<pre id="apiPre"></pre>
+
+<script>
+  function setResult(ok, error) {
+    const out = { success: !!ok };
+    if (!ok && error) out.error = String(error);
+    document.getElementById('apiPre').textContent = JSON.stringify(out, null, 2);
+  }
+  setResult(false, 'no webhook/message provided in URL');
+
+  let isSending = false;
+  let lastAutoKey = '';
+
+  // Safe Base64 Decoding that supports URL symbols and Unicode
+  function decodeUrlSafeBase64(base64url) {
+    if (!base64url) return '';
+    let v = base64url;
+    if (v.indexOf('%') !== -1) {
+      try { v = decodeURIComponent(v); } catch (e) { /* use raw */ }
+    }
+    let base64 = v.replace(/-/g, '+').replace(/_/g, '/'); // Revert URL safe characters
+    while (base64.length % 4) base64 += '='; // Re-add missing padding
+    try {
+      const binaryString = atob(base64);
+      const bytes = new Uint8Array(binaryString.length);
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+      return new TextDecoder().decode(bytes);
+    } catch (e) {
+      console.error("Base64 decoding failed:", e);
+      return null;
+    }
+  }
+
+  function validWebhook(url) {
+    return url.startsWith('https://discord.com/api/webhooks/')
+      || url.startsWith('https://discordapp.com/api/webhooks/')
+      || url.startsWith('https://ptb.discord.com/api/webhooks/')
+      || url.startsWith('https://canary.discord.com/api/webhooks/');
+  }
+
+  function notifyParent(ok, extra) {
+    try {
+      window.parent.postMessage(Object.assign({ type: 'discord-webhook-result', ok: !!ok }, extra || {}), '*');
+    } catch (e) { /* no parent — ignore */ }
+  }
+
+  // Hash-only. Accepted shapes (values are base64url):
+  //   #?webhook=XXX/?message=YYY   (also with & instead of /)
+  //   #?webhook=XXX&message=YYY
+  //   #/XXX/YYY                     (legacy positional fallback)
+  function parseHash() {
+    const raw = window.location.hash || '';
+    const h = raw.replace(/^#/, '');
+    let hook64 = '', msg64 = '', botname64 = '', username = '', avatar = '', manual = false;
+    const positional = [];
+
+    const parts = h.replace(/\//g, '&').split('&');
+    for (let i = 0; i < parts.length; i++) {
+      const seg = parts[i].replace(/^\?/, '');
+      if (!seg) continue;
+      const eq = seg.indexOf('=');
+      if (eq < 0) { positional.push(seg); continue; }
+      const k = seg.slice(0, eq).toLowerCase();
+      const v = seg.slice(eq + 1);
+      if (k === 'webhook' || k === 'hook') hook64 = v;
+      else if (k === 'message' || k === 'msg' || k === 'content' || k === 'text') msg64 = v;
+      else if (k === 'botname') botname64 = v;
+      else if (k === 'username' || k === 'name') { try { username = decodeURIComponent(v); } catch (e) { username = v; } }
+      else if (k === 'avatar' || k === 'avatar_url') { try { avatar = decodeURIComponent(v); } catch (e) { avatar = v; } }
+      else if (k === 'manual') manual = true;
+      else if (k === 'auto' && v === '0') manual = true;
+    }
+
+    if (hook64 || msg64) {
+      const hook = decodeUrlSafeBase64(hook64);
+      const msg = decodeUrlSafeBase64(msg64);
+      if ((hook64 && hook === null) || (msg64 && msg === null)) {
+        return { hook: '', msg: '', username: '', avatar: '', manual: manual, error: 'invalid base64 encoding' };
+      }
+      let botname = '';
+      if (botname64) {
+        const dec = decodeUrlSafeBase64(botname64);
+        if (dec !== null) botname = dec;
+        else { try { botname = decodeURIComponent(botname64); } catch (e) { botname = botname64; } }
+      }
+      return {
+        hook: hook,
+        msg: msg,
+        username: (botname || username).slice(0, 80),
+        avatar: avatar.trim(),
+        manual: manual
+      };
+    }
+    // legacy: #/<b64 webhook>/<b64 message>
+    const segs = raw.replace(/^#\/?/, '').split('/').filter(Boolean);
+    if (segs.length >= 2) {
+      const hook = decodeUrlSafeBase64(segs[0]);
+      const msg = decodeUrlSafeBase64(segs[1]);
+      if (hook === null || msg === null) {
+        return { hook: '', msg: '', username: '', avatar: '', manual: manual, error: 'invalid base64 encoding' };
+      }
+      return {
+        hook: hook,
+        msg: msg,
+        username: '', avatar: '', manual: manual
+      };
+    }
+    return { hook: '', msg: '', username: '', avatar: '', manual: manual };
+  }
+
+  async function sendToDiscord(hook, msg, username, avatar) {
+    if (isSending) return;
+    isSending = true;
+    const payload = {
+      content: msg.slice(0, 2000),
+      allowed_mentions: { parse: [] }
+    };
+    if (username) payload.username = username;
+    if (avatar) payload.avatar_url = avatar;
+
+    try {
+      const response = await fetch(hook, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      if (response.ok || response.status === 204) { // Discord returns 204 No Content on successful hooks
+        setResult(true);
+        notifyParent(true, { status: response.status });
+      } else if (response.status === 429) {
+        let retry = null;
+        try { retry = (await response.json()).retry_after || null; } catch (e) {}
+        setResult(false, 'rate limited, retry after ~' + retry + 's');
+        notifyParent(false, { status: 429, error: 'rate_limited', retry_after: retry });
+      } else {
+        throw new Error('Server status: ' + response.status);
+      }
+    } catch (error) {
+      setResult(false, (error && error.message) || 'send failed');
+      notifyParent(false, { error: String((error && error.message) || error) });
+      console.error(error);
+    } finally {
+      isSending = false;
+    }
+  }
+
+  function processUrl() {
+    const parsed = parseHash();
+    if (parsed.error) { setResult(false, parsed.error); return; }
+    if (parsed.hook && validWebhook(parsed.hook) && parsed.msg.trim()) {
+      // API mode: auto-send once per unique hash
+      const key = parsed.hook + '\n' + parsed.msg + '\n' + parsed.username + '\n' + parsed.avatar;
+      if (!parsed.manual && key !== lastAutoKey) {
+        lastAutoKey = key;
+        sendToDiscord(parsed.hook, parsed.msg, parsed.username, parsed.avatar);
+      }
+    } else if (parsed.hook || parsed.msg) {
+      if (!parsed.hook || !validWebhook(parsed.hook)) setResult(false, 'invalid webhook URL');
+      else setResult(false, 'empty message');
+    }
+  }
+
+  window.addEventListener('hashchange', processUrl);
+  window.addEventListener('DOMContentLoaded', processUrl);
+  processUrl();
+</script>
