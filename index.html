@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GitHub Pages Hash Router</title>
+    <style>
+        body { font-family: sans-serif; padding: 40px; line-height: 1.6; }
+        .card { background: #f4f4f9; padding: 20px; border-radius: 8px; max-width: 500px; }
+        span { font-weight: bold; color: #0066cc; }
+    </style>
+</head>
+<body>
+
+    <h1>Single Page App Router</h1>
+    <div class="card">
+        <p><strong>Full Hash:</strong> <span id="full-hash">None</span></p>
+        <p><strong>First Data parameter:</strong> <span id="param1">None</span></p>
+        <p><strong>Second Data parameter:</strong> <span id="param2">None</span></p>
+    </div>
+
+    <script>
+        function parseUrlData() {
+            // 1. Get the hash from the URL (e.g., "#/data/seconddata")
+            const hash = window.location.hash;
+            document.getElementById('full-hash').innerText = hash || 'None';
+
+            if (hash) {
+                // 2. Remove the leading '#' and split the remaining string by '/'
+                // filter(Boolean) removes any empty strings caused by trailing slashes
+                const segments = hash.replace(/^#\/?/, '').split('/').filter(Boolean);
+
+                // 3. Assign the variables based on their array position
+                const firstData = segments[0] || 'None';
+                const secondData = segments[1] || 'None';
+
+                // 4. Update the DOM
+                document.getElementById('param1').innerText = firstData;
+                document.getElementById('param2').innerText = secondData;
+            } else {
+                document.getElementById('param1').innerText = 'None';
+                document.getElementById('param2').innerText = 'None';
+            }
+        }
+
+        // Listen for URL hash changes without reloading the page
+        window.addEventListener('hashchange', parseUrlData);
+
+        // Run the function when the page initially loads
+        window.addEventListener('DOMContentLoaded', parseUrlData);
+    </script>
+</body>
+</html>
