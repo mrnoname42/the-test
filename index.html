@@ -1,113 +1,149 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>GitHub Pages Discord Webhook Router</title>
-    <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; padding: 40px; background-color: #2f3136; color: #dcddde; }
-        .card { background: #36393f; padding: 25px; border-radius: 8px; max-width: 600px; box-shadow: 0 4px 10px rgba(0,0,0,0.3); border: 1px solid #202225; }
-        span { font-family: monospace; font-weight: bold; color: #7289da; word-break: break-all; }
-        button { background-color: #5865F2; color: white; border: none; padding: 12px 20px; font-size: 16px; border-radius: 4px; cursor: pointer; font-weight: bold; width: 100%; margin-top: 15px; }
-        button:hover { background-color: #4752c4; }
-        button:disabled { background-color: #4f545c; cursor: not-allowed; }
-        .status { margin-top: 15px; font-weight: bold; padding: 10px; border-radius: 4px; display: none; }
-        .success { background-color: rgba(59, 165, 93, 0.2); color: #3ba55d; border: 1px solid #3ba55d; }
-        .error { background-color: rgba(237, 66, 69, 0.2); color: #ed4245; border: 1px solid #ed4245; }
-    </style>
-</head>
-<body>
+<style>
+  body { text-align: left; margin: 0; padding: 8px; background: #ffffff; color: #000000; font-family: monospace; font-size: 14px; }
+  pre { margin: 0; white-space: pre-wrap; word-break: break-all; }
+</style>
 
-    <h1>Discord Webhook Dispatcher</h1>
-    <div class="card">
-        <p><strong>Decoded Webhook URL:</strong> <span id="webhook-display">None detected</span></p>
-        <p><strong>Decoded Message:</strong> <span id="message-display">None detected</span></p>
-        
-        <button id="send-btn" disabled onclick="sendToDiscord()">Send Message to Discord</button>
-        <div id="status-box" class="status"></div>
-    </div>
+<pre id="apiPre"></pre>
 
-    <script>
-        let globalWebhookUrl = '';
-        let globalMessage = '';
+<script>
+  document.getElementById('apiPre').textContent = JSON.stringify({
+    website: window.location.host,
+    api: 'discord-webhook-dispatcher',
+    help: 'append #?webhook=BASE64/?message=BASE64 to auto-send'
+  });
 
-        // Safe Base64 Decoding that supports URL symbols and Unicode
-        function decodeUrlSafeBase64(base64url) {
-            if (!base64url) return '';
-            let base64 = base64url.replace(/-/g, '+').replace(/_/g, '/'); // Revert URL safe characters
-            while (base64.length % 4) base64 += '='; // Re-add missing padding
-            try {
-                // Convert back from binary string safely
-                const binaryString = atob(base64);
-                const bytes = new Uint8Array(binaryString.length);
-                for (let i = 0; i < binaryString.length; i++) {
-                    bytes[i] = binaryString.charCodeAt(i);
-                }
-                return new TextDecoder().decode(bytes);
-            } catch (e) {
-                console.error("Base64 decoding failed:", e);
-                return 'Error decoding data';
-            }
-        }
+  let isSending = false;
+  let lastAutoKey = '';
 
-        function processUrl() {
-            const hash = window.location.hash;
-            if (hash) {
-                // Remove the '#' and split your router fragments
-                const segments = hash.replace(/^#\/?/, '').split('/').filter(Boolean);
+  // Safe Base64 Decoding that supports URL symbols and Unicode
+  function decodeUrlSafeBase64(base64url) {
+    if (!base64url) return '';
+    let v = base64url;
+    if (v.indexOf('%') !== -1) {
+      try { v = decodeURIComponent(v); } catch (e) { /* use raw */ }
+    }
+    let base64 = v.replace(/-/g, '+').replace(/_/g, '/'); // Revert URL safe characters
+    while (base64.length % 4) base64 += '='; // Re-add missing padding
+    try {
+      const binaryString = atob(base64);
+      const bytes = new Uint8Array(binaryString.length);
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+      return new TextDecoder().decode(bytes);
+    } catch (e) {
+      console.error("Base64 decoding failed:", e);
+      return '';
+    }
+  }
 
-                if (segments.length >= 2) {
-                    // Extract and decode both data parameters
-                    globalWebhookUrl = decodeUrlSafeBase64(segments[0]);
-                    globalMessage = decodeUrlSafeBase64(segments[1]);
+  function validWebhook(url) {
+    return url.startsWith('https://discord.com/api/webhooks/')
+      || url.startsWith('https://discordapp.com/api/webhooks/')
+      || url.startsWith('https://ptb.discord.com/api/webhooks/')
+      || url.startsWith('https://canary.discord.com/api/webhooks/');
+  }
 
-                    // Update UI elements
-                    document.getElementById('webhook-display').innerText = globalWebhookUrl;
-                    document.getElementById('message-display').innerText = globalMessage;
+  function notifyParent(ok, extra) {
+    try {
+      window.parent.postMessage(Object.assign({ type: 'discord-webhook-result', ok: !!ok }, extra || {}), '*');
+    } catch (e) { /* no parent — ignore */ }
+  }
 
-                    // Validate if it looks like a real discord webhook
-                    if (globalWebhookUrl.startsWith('https://discord.com/api/webhooks/') || globalWebhookUrl.startsWith('https://discordapp.com')) {
-                        document.getElementById('send-btn').disabled = false;
-                    } else {
-                        document.getElementById('webhook-display').innerText = "Invalid Discord Webhook format.";
-                    }
-                }
-            }
-        }
+  // Hash-only. Accepted shapes (values are base64url):
+  //   #?webhook=XXX/?message=YYY   (also with & instead of /)
+  //   #?webhook=XXX&message=YYY
+  //   #/XXX/YYY                     (legacy positional fallback)
+  function parseHash() {
+    const raw = window.location.hash || '';
+    const h = raw.replace(/^#/, '');
+    let hook64 = '', msg64 = '', username = '', avatar = '', manual = false;
+    const positional = [];
 
-        async function sendToDiscord() {
-            const btn = document.getElementById('send-btn');
-            const statusBox = document.getElementById('status-box');
-            btn.disabled = true;
-            btn.innerText = "Sending...";
+    const parts = h.replace(/\//g, '&').split('&');
+    for (let i = 0; i < parts.length; i++) {
+      const seg = parts[i].replace(/^\?/, '');
+      if (!seg) continue;
+      const eq = seg.indexOf('=');
+      if (eq < 0) { positional.push(seg); continue; }
+      const k = seg.slice(0, eq).toLowerCase();
+      const v = seg.slice(eq + 1);
+      if (k === 'webhook' || k === 'hook') hook64 = v;
+      else if (k === 'message' || k === 'msg' || k === 'content' || k === 'text') msg64 = v;
+      else if (k === 'username' || k === 'name') { try { username = decodeURIComponent(v); } catch (e) { username = v; } }
+      else if (k === 'avatar' || k === 'avatar_url') { try { avatar = decodeURIComponent(v); } catch (e) { avatar = v; } }
+      else if (k === 'manual') manual = true;
+      else if (k === 'auto' && v === '0') manual = true;
+    }
 
-            try {
-                // Post payload directly to Discord API
-                const response = await fetch(globalWebhookUrl, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ content: globalMessage })
-                });
+    if (hook64 || msg64) {
+      return {
+        hook: decodeUrlSafeBase64(hook64),
+        msg: decodeUrlSafeBase64(msg64),
+        username: username.slice(0, 80),
+        avatar: avatar.trim(),
+        manual: manual
+      };
+    }
+    // legacy: #/<b64 webhook>/<b64 message>
+    const segs = raw.replace(/^#\/?/, '').split('/').filter(Boolean);
+    if (segs.length >= 2) {
+      return {
+        hook: decodeUrlSafeBase64(segs[0]),
+        msg: decodeUrlSafeBase64(segs[1]),
+        username: '', avatar: '', manual: manual
+      };
+    }
+    return { hook: '', msg: '', username: '', avatar: '', manual: manual };
+  }
 
-                if (response.ok || response.status === 204) { // Discord returns 204 No Content on successful hooks
-                    statusBox.className = "status success";
-                    statusBox.innerText = "🚀 Message sent successfully!";
-                } else {
-                    throw new Error(`Server status: ${response.status}`);
-                }
-            } catch (error) {
-                statusBox.className = "status error";
-                statusBox.innerText = "❌ Failed to send message. Check Webhook URL.";
-                console.error(error);
-            } finally {
-                statusBox.style.display = "block";
-                btn.disabled = false;
-                btn.innerText = "Send Message to Discord";
-            }
-        }
+  async function sendToDiscord(hook, msg, username, avatar) {
+    if (isSending) return;
+    isSending = true;
+    const payload = {
+      content: msg.slice(0, 2000),
+      allowed_mentions: { parse: [] }
+    };
+    if (username) payload.username = username;
+    if (avatar) payload.avatar_url = avatar;
 
-        window.addEventListener('hashchange', processUrl);
-        window.addEventListener('DOMContentLoaded', processUrl);
-    </script>
-</body>
-</html>
+    try {
+      const response = await fetch(hook, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      if (response.ok || response.status === 204) { // Discord returns 204 No Content on successful hooks
+        notifyParent(true, { status: response.status });
+      } else if (response.status === 429) {
+        let retry = null;
+        try { retry = (await response.json()).retry_after || null; } catch (e) {}
+        notifyParent(false, { status: 429, error: 'rate_limited', retry_after: retry });
+      } else {
+        throw new Error('Server status: ' + response.status);
+      }
+    } catch (error) {
+      notifyParent(false, { error: String((error && error.message) || error) });
+      console.error(error);
+    } finally {
+      isSending = false;
+    }
+  }
+
+  function processUrl() {
+    const parsed = parseHash();
+    if (parsed.hook && validWebhook(parsed.hook) && parsed.msg.trim()) {
+      // API mode: auto-send once per unique hash
+      const key = parsed.hook + '\n' + parsed.msg + '\n' + parsed.username + '\n' + parsed.avatar;
+      if (!parsed.manual && key !== lastAutoKey) {
+        lastAutoKey = key;
+        sendToDiscord(parsed.hook, parsed.msg, parsed.username, parsed.avatar);
+      }
+    }
+  }
+
+  window.addEventListener('hashchange', processUrl);
+  window.addEventListener('DOMContentLoaded', processUrl);
+  processUrl();
+</script>
