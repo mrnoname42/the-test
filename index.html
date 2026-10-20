@@ -58,7 +58,7 @@
   function parseHash() {
     const raw = window.location.hash || '';
     const h = raw.replace(/^#/, '');
-    let hook64 = '', msg64 = '', username = '', avatar = '', manual = false;
+    let hook64 = '', msg64 = '', botname64 = '', username = '', avatar = '', manual = false;
     const positional = [];
 
     const parts = h.replace(/\//g, '&').split('&');
@@ -71,6 +71,7 @@
       const v = seg.slice(eq + 1);
       if (k === 'webhook' || k === 'hook') hook64 = v;
       else if (k === 'message' || k === 'msg' || k === 'content' || k === 'text') msg64 = v;
+      else if (k === 'botname') botname64 = v;
       else if (k === 'username' || k === 'name') { try { username = decodeURIComponent(v); } catch (e) { username = v; } }
       else if (k === 'avatar' || k === 'avatar_url') { try { avatar = decodeURIComponent(v); } catch (e) { avatar = v; } }
       else if (k === 'manual') manual = true;
@@ -83,10 +84,16 @@
       if ((hook64 && hook === null) || (msg64 && msg === null)) {
         return { hook: '', msg: '', username: '', avatar: '', manual: manual, error: 'invalid base64 encoding' };
       }
+      let botname = '';
+      if (botname64) {
+        const dec = decodeUrlSafeBase64(botname64);
+        if (dec !== null) botname = dec;
+        else { try { botname = decodeURIComponent(botname64); } catch (e) { botname = botname64; } }
+      }
       return {
         hook: hook,
         msg: msg,
-        username: username.slice(0, 80),
+        username: (botname || username).slice(0, 80),
         avatar: avatar.trim(),
         manual: manual
       };
